@@ -105,9 +105,19 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # Telegram'da mp3/wav gibi dosyalar bazen "audio" değil "document" olarak
+    # gelir (özellikle bilgisayardan sürükleyip bırakınca) — bunu da kabul et.
     voice = message.voice or message.audio
+    if voice is None and message.document is not None:
+        mime = (message.document.mime_type or "")
+        name = (message.document.file_name or "")
+        if mime.startswith("audio/") or name.lower().endswith((".mp3", ".wav", ".m4a", ".ogg", ".oga", ".flac")):
+            voice = message.document
+
     if voice is None:
-        await message.reply_text("Bir ses dosyası veya sesli mesaj göndermelisin.")
+        await message.reply_text(
+            "Bir ses dosyası veya sesli mesaj göndermelisin (mp3/wav/m4a da olur)."
+        )
         return
 
     await message.reply_text("Alındı, işleniyor... 🎧")
@@ -154,7 +164,11 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(menu_callback, pattern="^menu:"))
-    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_audio))
+    # mp3/wav gibi dosyalar Telegram'da bazen "document" olarak geldiği için
+    # filters.Document.AUDIO'yu da dinliyoruz, yoksa mesaj hiç bu fonksiyona düşmüyordu.
+    app.add_handler(
+        MessageHandler(filters.VOICE | filters.AUDIO | filters.Document.AUDIO, handle_audio)
+    )
 
     logger.info("Bot başlatılıyor (polling modu)...")
     app.run_polling()
