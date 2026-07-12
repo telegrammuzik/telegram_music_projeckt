@@ -18,6 +18,14 @@ bölüyordu ("kötü çeviri" şikayetinin sebebi). Bunu düzeltmek için:
   3. Aynı perdeye sahip, aralarında çok kısa (nefes/algı boşluğu kaynaklı)
      boşluk olan notalar birleştiriliyor
   4. Düşük güvenilirlikli (voiced_prob düşük) kareler pitch hesaplamasına dahil edilmiyor
+
+v1.2 güncellemesi: v1.1 hâlâ yetersizdi — gerçek bir test kaydında (mırıldanan
+basit bir "çık-in" ezgi) hâlâ 20+ kırık mikro-nota çıkıyordu, çünkü nota sınırına
+(iki yarım ton arası tam ortaya) yakın titreşen bir ses ileri geri "yuvarlanıp"
+duruyordu. Şimdi klasik bir "Schmitt tetikleyici" mantığı eklendi: bir notaya
+kilitlendikten sonra, perde sınırın tam ortasından değil, sınırın biraz ötesine
+(HYSTERESIS_MARGIN) geçmeden yeni nota adayı bile açılmıyor. Ayrıca kararlılık
+süresi ve yumuşatma penceresi büyütüldü.
 """
 
 import numpy as np
@@ -25,11 +33,13 @@ import librosa
 import pretty_midi
 from scipy.signal import medfilt
 
-MIN_NOTE_DURATION_SEC = 0.09
-MIN_STABLE_FRAMES = 3          # yeni perdenin nota değişimi için kararlı kalması gereken kare sayısı
-MAX_MERGE_GAP_SEC = 0.12       # aynı perdeye sahip notalar arasında birleştirilecek maksimum boşluk
+MIN_NOTE_DURATION_SEC = 0.12
+MIN_STABLE_FRAMES = 5          # yeni perdenin nota değişimi için kararlı kalması gereken kare sayısı
+MAX_MERGE_GAP_SEC = 0.15       # aynı perdeye sahip notalar arasında birleştirilecek maksimum boşluk
 VOICED_PROB_THRESHOLD = 0.5    # bu değerin altındaki kareler güvenilmez sayılıp atlanır
-MEDIAN_FILTER_WINDOW = 7       # ham pitch eğrisini yumuşatmak için (kare sayısı, tek sayı olmalı)
+MEDIAN_FILTER_WINDOW = 11      # ham pitch eğrisini yumuşatmak için (kare sayısı, tek sayı olmalı)
+HYSTERESIS_MARGIN = 0.62       # yarım tondan (0.5) biraz fazla — sınırda çırpınmayı engeller
+MIN_RELATIVE_ENERGY = 0.06     # en yüksek sesin bu oranından sessiz kareler yok sayılır
 
 
 def _hz_to_midi_float(freq: float) -> float:
@@ -44,18 +54,31 @@ def transcribe_to_midi(wav_path: str, output_midi_path: str):
     """
     y, sr = librosa.load(wav_path, sr=22050, mono=True)
 
+    hop_length = 512
+    frame_length = 2048
+
     f0, voiced_flag, voiced_prob = librosa.pyin(
         y,
         fmin=librosa.note_to_hz("C2"),
         fmax=librosa.note_to_hz("C7"),
         sr=sr,
+        frame_length=frame_length,
+        hop_length=hop_length,
     )
 
-    hop_length = 512
     times = librosa.times_like(f0, sr=sr, hop_length=hop_length)
 
-    # 1) Güvenilir olmayan kareleri (düşük voiced_prob) sessiz say
-    valid = voiced_flag & (voiced_prob >= VOICED_PROB_THRESHOLD) & ~np.isnan(f0)
+    # Kayıt başında/sesler arasında kalan çok sessiz (nefes/gürültü) kareleri de
+    # ele — bazen bunlar yanlışlıkla tiz bir "hayalet nota" olarak algılanabiliyor.
+    rms = librosa.feature.rms(y=y, frame_length=frame_length, hop_length=hop_length)[0]
+    min_len = min(len(rms), len(f0))
+    rms, f0, voiced_flag, voiced_prob, times = (
+        rms[:min_len], f0[:min_len], voiced_flag[:min_len], voiced_prob[:min_len], times[:min_len]
+    )
+    energy_gate = rms >= (MIN_RELATIVE_ENERGY * rms.max()) if rms.max() > 0 else np.zeros_like(rms, dtype=bool)
+
+    # 1) Güvenilir olmayan kareleri (düşük voiced_prob, düşük enerji) sessiz say
+    valid = voiced_flag & (voiced_prob >= VOICED_PROB_THRESHOLD) & energy_gate & ~np.isnan(f0)
 
     # 2) Ham frekansı sürekli (float) MIDI nota numarasına çevir
     midi_continuous = np.full_like(f0, np.nan, dtype=float)
@@ -90,31 +113,35 @@ def transcribe_to_midi(wav_path: str, output_midi_path: str):
             pending_pitch, pending_count = None, 0
             continue
 
-        candidate = int(round(m))
-
         if current is None:
-            current = {"start": t, "end": t, "pitch": candidate, "raw": [m]}
+            current = {"start": t, "end": t, "pitch": int(round(m)), "raw": [m]}
             pending_pitch, pending_count = None, 0
             continue
 
-        if candidate == current["pitch"]:
+        # Schmitt tetikleyici: kilitli notanın tam sınırında (±0.5) değil,
+        # biraz daha ötesinde (±HYSTERESIS_MARGIN) sapma olmadan aday bile açma.
+        # Bu, sınıra yakın titreşen bir sesin iki nota arasında çırpınmasını engeller.
+        if abs(m - current["pitch"]) <= HYSTERESIS_MARGIN:
             current["end"] = t
             current["raw"].append(m)
             pending_pitch, pending_count = None, 0
-        else:
-            if candidate == pending_pitch:
-                pending_count += 1
-            else:
-                pending_pitch, pending_count = candidate, 1
+            continue
 
-            if pending_count >= MIN_STABLE_FRAMES:
-                # Yeni perde yeterince kararlı kaldı, gerçek bir nota değişimi kabul et
-                raw_notes.append(current)
-                current = {"start": t, "end": t, "pitch": candidate, "raw": [m]}
-                pending_pitch, pending_count = None, 0
-            else:
-                # Geçici/gürültü sayılan sapma — mevcut notaya devam et
-                current["end"] = t
+        candidate = int(round(m))
+
+        if candidate == pending_pitch:
+            pending_count += 1
+        else:
+            pending_pitch, pending_count = candidate, 1
+
+        if pending_count >= MIN_STABLE_FRAMES:
+            # Yeni perde yeterince kararlı kaldı, gerçek bir nota değişimi kabul et
+            raw_notes.append(current)
+            current = {"start": t, "end": t, "pitch": candidate, "raw": [m]}
+            pending_pitch, pending_count = None, 0
+        else:
+            # Geçici/gürültü sayılan sapma — mevcut notaya devam et
+            current["end"] = t
 
     if current is not None:
         raw_notes.append(current)
