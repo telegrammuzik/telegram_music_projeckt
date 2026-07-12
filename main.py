@@ -12,7 +12,7 @@ import logging
 import os
 import tempfile
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
@@ -38,13 +38,22 @@ class _HealthHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"OK - bot calisiyor")
 
+    def do_HEAD(self):
+        # Bazı ping servisleri (UptimeRobot dahil) GET yerine HEAD isteği
+        # gönderebilir — bu tanımlı olmazsa varsayılan olarak 501 dönüp
+        # servis "down" gibi görünür.
+        self.send_response(200)
+        self.end_headers()
+
     def log_message(self, format, *args):
         pass  # Render loglarını gereksiz istek kayitlariyla kirletmesin
 
 
 def _start_health_server():
     port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(("0.0.0.0", port), _HealthHandler)
+    # ThreadingHTTPServer: her istek ayrı bir thread'de karşılanır, ağır ses
+    # işleme sırasında ping isteği kuyrukta bekleyip zaman aşımına uğramasın.
+    server = ThreadingHTTPServer(("0.0.0.0", port), _HealthHandler)
     server.serve_forever()
 from core.audio import convert_to_wav
 from modules.hum_to_midi import transcribe_to_midi
