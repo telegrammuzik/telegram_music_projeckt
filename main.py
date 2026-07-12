@@ -90,21 +90,27 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # update.message bazı update türlerinde (örn. düzenlenmiş mesaj) boş
+    # olabiliyor ve bu çökmeye sebep oluyordu — effective_message daha güvenli.
+    message = update.effective_message
+    if message is None:
+        return
+
     mode = context.user_data.get("mode")
 
     if mode != "hum_to_midi":
-        await update.message.reply_text(
+        await message.reply_text(
             "Önce menüden '🎤 Mırıldan / Çal → MIDI' butonuna basmalısın.",
             reply_markup=MAIN_MENU,
         )
         return
 
-    voice = update.message.voice or update.message.audio
+    voice = message.voice or message.audio
     if voice is None:
-        await update.message.reply_text("Bir ses dosyası veya sesli mesaj göndermelisin.")
+        await message.reply_text("Bir ses dosyası veya sesli mesaj göndermelisin.")
         return
 
-    await update.message.reply_text("Alındı, işleniyor... 🎧")
+    await message.reply_text("Alındı, işleniyor... 🎧")
 
     tg_file = await context.bot.get_file(voice.file_id)
 
@@ -118,21 +124,21 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
             _, note_count = transcribe_to_midi(wav_path, midi_path)
 
             if note_count == 0:
-                await update.message.reply_text(
+                await message.reply_text(
                     "Kayıtta net bir nota algılayamadım. Daha net ve tek sesli "
                     "mırıldanıp tekrar dener misin?"
                 )
                 return
 
             with open(midi_path, "rb") as f:
-                await update.message.reply_document(
+                await message.reply_document(
                     document=f,
                     filename="melodi.mid",
                     caption=f"{note_count} nota tespit edildi. DAW'ına sürükleyip kullanabilirsin.",
                 )
         except Exception as e:
             logger.exception("Ses işleme hatası")
-            await update.message.reply_text(
+            await message.reply_text(
                 f"Bir hata oluştu, tekrar dener misin? (Detay: {e})"
             )
 
