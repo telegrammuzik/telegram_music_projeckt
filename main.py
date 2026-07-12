@@ -11,6 +11,8 @@ Mevcut fazlara dokunmadan böyle genişletilir.
 import logging
 import os
 import tempfile
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
@@ -23,6 +25,27 @@ from telegram.ext import (
 )
 
 from core.config import TELEGRAM_BOT_TOKEN
+
+
+class _HealthHandler(BaseHTTPRequestHandler):
+    """Render'ın 'servis ayakta mı' kontrolü ve UptimeRobot ping'i için basit
+    bir HTTP cevabı. Bot kendisi Telegram'a 'polling' ile bağlanıyor, ayrı bir
+    web sunucusuna ihtiyacı yok — ama Render'ın port bekleyen sağlık kontrolü
+    ve uyanık tutma servisi (UptimeRobot vb.) bu adrese HTTP isteği atacak."""
+
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK - bot calisiyor")
+
+    def log_message(self, format, *args):
+        pass  # Render loglarını gereksiz istek kayitlariyla kirletmesin
+
+
+def _start_health_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), _HealthHandler)
+    server.serve_forever()
 from core.audio import convert_to_wav
 from modules.hum_to_midi import transcribe_to_midi
 
@@ -106,6 +129,12 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
+    # Render'ın "servis ayakta mı" kontrolü ve UptimeRobot ping'i için ayrı bir
+    # thread'de basit bir HTTP sunucusu başlat (bot Telegram'a polling ile
+    # bağlanıyor, kendi başına bir web portu açmıyor).
+    threading.Thread(target=_start_health_server, daemon=True).start()
+    logger.info("Sağlık kontrolü (health check) sunucusu başlatıldı.")
+
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
